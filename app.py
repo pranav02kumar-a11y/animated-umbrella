@@ -348,33 +348,72 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+st.markdown("""
+<style>
+/* Default forward lane arrow */
+.arrow{ font-size:22px; color:rgba(60,84,96,0.65); user-select:none; }
+
+/* Backward (temporary) arrow between nodes during retry */
+.arrow-back{
+  font-size:22px; color:#E74C3C; user-select:none;
+  text-shadow:0 0 8px rgba(231,76,60,.22);
+}
+.arrow-back.pulse{
+  animation:backpulse .9s ease-in-out infinite;
+}
+@keyframes backpulse{
+  0%{ transform:translateY(0); }
+  50%{ transform:translateY(-1px); }
+  100%{ transform:translateY(0); }
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 st.markdown(LANE_BASE_CSS, unsafe_allow_html=True)
 
-def lane_html(title, nodes, states, retry_badges=None, events_html=""):
-    # retry_badges: dict[int -> {"type": "live"|"scar", "label": "↶", "title": "..."}]
-    arrow_sep = '<span class="arrow">→</span>'
-    pills = []
+import html
+
+def lane_html(
+    title,
+    nodes,
+    states,
+    retry_badges=None,
+    events_html="",
+    back_edge_idx=None,     # ← index of arrow between nodes[i] and nodes[i+1]
+    back_live=False,        # ← make it pulse while retrying
+):
+    # Pills (with optional badges/scars)
+    pill_wrapped = []
     for i, (label, s) in enumerate(zip(nodes, states)):
         pill = f'<div class="node-pill {s}">{html.escape(label)}</div>'
         badge = ""
-        if retry_badges and i in retry_badges: 
+        if retry_badges and i in retry_badges:
             b = retry_badges[i]
             if b.get("type") == "live":
                 badge = f'<span class="retry-badge" title="{html.escape(b.get("title","Retry"))}">{html.escape(b.get("label","↶"))}</span>'
             elif b.get("type") == "scar":
                 badge = f'<span class="retry-scar" title="{html.escape(b.get("title","1 retry"))}"></span>'
-        pills.append(f'<span class="node-wrap">{pill}{badge}</span>')
-    joined = (' ' + arrow_sep + ' ').join(pills)
+        pill_wrapped.append(f'<span class="node-wrap">{pill}{badge}</span>')
 
-    content = (
+    # Interleave arrows (forward by default; one edge can be backward/red)
+    segments = []
+    for i in range(len(nodes)):
+        segments.append(pill_wrapped[i])
+        if i < len(nodes) - 1:
+            if back_edge_idx is not None and i == back_edge_idx:
+                cls = "arrow-back pulse" if back_live else "arrow-back"
+                segments.append(f'<span class="{cls}">←</span>')
+            else:
+                segments.append('<span class="arrow">→</span>')
+
+    html_lane = (
         '<div class="group-title">' + html.escape(title) + '</div>'
-        '<div class="lane">' + joined + '</div>'
+        '<div class="lane">' + "".join(segments) + '</div>'
     )
     if events_html:
-        content += f'<div class="event-row">{events_html}</div>'
-    return content
-
-
+        html_lane += f'<div class="event-row">{events_html}</div>'
+    return html_lane
 
 
 GLOBAL_CSS = f"""
@@ -957,8 +996,10 @@ def page_process():
     # Node states
     dp_nodes  = DOC_NODES[:]     # ["Document Upload", ..., "Trigger Evaluation"]
     dp_states = ["pending"] * len(dp_nodes)
-    retry_badges = {}   # index -> {"type": "live"|"scar", "label": "↶", "title": "..."}
-    event_chips  = []  # strings of small chips under the lane
+    retry_badges = {}   # existing badges map (keep)
+    event_chips  = []   # existing chips (keep)
+    arrow_back_idx  = None   # ← which edge to flip (e.g., 3 for Proxy→Async)
+    arrow_back_live = False  # ← pulse while retrying
 
     def paint_lane(ingested=None, total=None, payloads=None, payloads_total=None):
       labels = dp_nodes[:]
@@ -971,14 +1012,12 @@ def page_process():
           "📄 Document Processing",
           labels,
           dp_states,
-          retry_badges=retry_badges,                    # <-- badges/scars
-          events_html="".join(
-              f'<span class="event-chip">{c}</span>' for c in event_chips
-          ),                                            # <-- chips row
+          retry_badges=retry_badges,
+          events_html="".join(f'<span class="event-chip">{c}</span>' for c in event_chips),
+          back_edge_idx=arrow_back_idx,          # ← pass current override
+          back_live=arrow_back_live,             # ← pulse during retry
       )
       lane_area.markdown(f'<div class="board">{html_lane}</div>', unsafe_allow_html=True)
-
-
 
 
     # 1–4: move as a bundle (happy path)
@@ -1011,23 +1050,30 @@ def page_process():
         if failing_active and idx == BULK_FAIL_DOC_INDEX:
           prev_node = 3  # "Proxy Document Retriever"
 
-          # 1) Async DB error (red) + show "live" retry badge and event chip
+          # Step 1: Async DB error + show live badge + flip arrow backward (Proxy←Async)
           dp_states[4] = "error"
           retry_badges[4] = {"type": "live", "label": "↶", "title": "Retrying via Proxy"}
           event_chips.append('<span class="red">↶</span> Async DB → Proxy')
+          arrow_back_idx  = 3        # edge between nodes[3] and nodes[4]
+          arrow_back_live = True     # pulse while retrying
           paint_lane(ingested=done, total=len(docs))
 
-          # 2) previous node re-processes (yellow -> green) while Async stays red
+          # Step 2: Proxy re-processes (yellow → green) while Async DB stays red
           dp_states[prev_node] = "progress"; paint_lane(ingested=done, total=len(docs)); wait("dp_progress")
           dp_states[prev_node] = "success";  paint_lane(ingested=done, total=len(docs)); wait("dp_success")
 
-          # 3) Async DB retries (yellow) and this doc completes
+          # Step 3: Async DB retries (yellow), then this doc completes
           dp_states[4] = "progress"; paint_lane(ingested=done, total=len(docs)); wait("fo_progress")
 
           doc_states[idx] = "success"
           done += 1
           event_chips.append('<span class="green">✓</span> Recovered')
-          retry_badges[4] = {"type": "scar", "title": "1 retry on this stage"}  # persist scar
+          retry_badges[4] = {"type": "scar", "title": "1 retry on this stage"}  # scar persists
+
+          # Clear the temporary back arrow now that Proxy succeeded
+          arrow_back_idx  = None
+          arrow_back_live = False
+
           paint_lane(ingested=done, total=len(docs))
           fanout_area.markdown(render_fanout(docs, doc_states), unsafe_allow_html=True)
           wait("fo_success")
