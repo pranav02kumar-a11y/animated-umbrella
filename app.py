@@ -1,13 +1,10 @@
 import streamlit as st
 import re
 import base64
-import streamlit.components.v1 as components
-
-
-from auth import sleep_step
 
 from datetime import datetime
 import html, random
+import time as _time
 
 def mock_fetch_intent_result(intent: str) -> dict:
     """Mock of your API result. Replace with the real call later."""
@@ -148,16 +145,11 @@ BG_TOP         = "#F7FAFF"
 BG_MID         = "#EFF4FB"
 BG_BOTTOM      = "#E6EFFA"
 TEXT_DARK      = "#16324A"
+ERROR          = "#E74C3C"
+PENDING        = "#98A6B3"
+SUCCESS        = "#34C759"
+PROGRESS       = "#FF9500"
 
-# ---------- MISSING BASICS (defined only if absent) ----------
-import time as _time
-
-# Colors
-if "PRIMARY" not in globals(): PRIMARY = "#7297C5"
-if "TEXT_DARK" not in globals(): TEXT_DARK = "#16324A"
-if "PENDING"   not in globals(): PENDING   = "#98A6B3"
-if "PROGRESS"  not in globals(): PROGRESS  = "#F4C542"
-if "SUCCESS"   not in globals(): SUCCESS   = "#34C759"  
 
 # Document Processing nodes
 if "DOC_NODES" not in globals():
@@ -285,93 +277,6 @@ def _render_payload_cards(names, idxs, results_map):
         '</div>'
     )
 
-
-
-# Minimal lane CSS (safe to include even if you already have styles)
-LANE_BASE_CSS = f"""
-<style>
-.board {{
-  background: rgba(255,255,255,0.98);
-  border: 1px solid rgba(22,50,74,0.08);
-  border-radius: 16px;
-  box-shadow: 0 8px 24px rgba(22,50,74,0.08);
-  padding: 14px 16px;
-}}
-.group-title {{ font-weight: 800; color: {PRIMARY}; margin: 4px 0 8px 4px; letter-spacing: .2px; }}
-.lane {{
-  display: flex; align-items: center; gap: 14px; flex-wrap: nowrap;
-  overflow-x: auto; padding: 10px 8px 14px 8px; border-radius: 12px;
-  background: #FAFDFF; border: 1px dashed rgba(79,121,177,0.18); min-width: 960px;
-}}
-.node-pill {{
-  flex-shrink: 0; min-width: 160px; text-align: center; white-space: nowrap;
-  padding: 10px 14px; border-radius: 999px; font-weight: 700; color: #173044;
-  background: #EEF3F7; border: 1px solid rgba(25,53,74,0.08);
-  transition: background-color .6s ease, box-shadow .6s ease, border-color .6s ease, color .6s ease;
-}}
-.arrow {{ font-size: 22px; color: rgba(60,84,96,0.65); user-select: none; }}
-.node-pill.pending  {{ background:#EEF3F7; color:#41515C; }}
-.node-pill.progress {{ background:{PROGRESS}; color:#132C3C; }}
-.node-pill.success  {{ background:{SUCCESS}; color:#06220E; }}
-</style>
-"""
-st.markdown("""
-<style>
-/* Wrap each pill so we can anchor a badge in its corner */
-.node-wrap{ position:relative; display:inline-block; }
-.node-pill{ position:relative; z-index:1; }
-
-/* Live retry badge (red) */
-.retry-badge{
-  position:absolute; top:-8px; right:-8px;
-  background:#E74C3C; color:#fff; font-weight:800;
-  border-radius:10px; padding:2px 6px; font-size:11px; line-height:1;
-  box-shadow:0 4px 10px rgba(231,76,60,0.28);
-}
-
-/* Scar (subtle) that stays after recovery */
-.retry-scar{
-  position:absolute; top:-6px; right:-6px;
-  width:10px; height:10px; border-radius:50%;
-  background:#A8B6C8;
-  box-shadow:0 0 0 2px rgba(168,182,200,0.25);
-}
-
-/* Event chip row under the lane */
-.event-row{ margin:6px 2px 0; display:flex; gap:8px; flex-wrap:wrap; }
-.event-chip{
-  background:#F3F7FD; color:#435768; border:1px solid rgba(22,50,74,0.10);
-  padding:4px 8px; border-radius:999px; font-size:12px; font-weight:700;
-}
-.event-chip .red{ color:#E74C3C; }
-.event-chip .green{ color:#2E7D32; }
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<style>
-/* Default forward lane arrow */
-.arrow{ font-size:22px; color:rgba(60,84,96,0.65); user-select:none; }
-
-/* Backward (temporary) arrow between nodes during retry */
-.arrow-back{
-  font-size:22px; color:#E74C3C; user-select:none;
-  text-shadow:0 0 8px rgba(231,76,60,.22);
-}
-.arrow-back.pulse{
-  animation:backpulse .9s ease-in-out infinite;
-}
-@keyframes backpulse{
-  0%{ transform:translateY(0); }
-  50%{ transform:translateY(-1px); }
-  100%{ transform:translateY(0); }
-}
-</style>
-""", unsafe_allow_html=True)
-
-
-st.markdown(LANE_BASE_CSS, unsafe_allow_html=True)
-
 def lane_html(
     title,
     nodes,
@@ -384,7 +289,11 @@ def lane_html(
     # pills (with optional badges/scars)
     pill_wrapped = []
     for i, (label, s) in enumerate(zip(nodes, states)):
-        pill = f'<div class="node-pill {s}">{html.escape(label)}</div>'
+        pill = (
+          f'<div class="node-pill {s}">'
+          f'  <span class="pill-label">{html.escape(label)}</span>'
+          f'</div>'
+      )
         badge = ""
         if retry_badges and i in retry_badges:
             b = retry_badges[i]
@@ -406,8 +315,8 @@ def lane_html(
                 segments.append('<span class="arrow-flex">→</span>')
 
     html_lane = (
-        '<div class="group-title">' + html.escape(title) + '</div>'
-        '<div class="lane">' + "".join(segments) + '</div>'
+      '<div class="group-title">' + html.escape(title) + '</div>'
+      '<div class="lane pipeline">' + "".join(segments) + '</div>'   # <-- add pipeline
     )
     if events_html:
         html_lane += f'<div class="event-row">{events_html}</div>'
@@ -472,10 +381,89 @@ GLOBAL_CSS = f"""
 </style>
 """
 
-PRIMARY        = "#7297C5"
-PRIMARY_DARK   = "#4F79B1"
-PRIMARY_LIGHT  = "#AFC3E1"
-TEXT_DARK      = "#16324A"
+PIPELINE_CSS = f"""
+<style>
+:root{{
+  /* keep a simple global scale for big screens */
+  --ui-scale: clamp(1, 0.9 + (100vw - 1200px)/1200, 1.6);
+}}
+
+.board{{ width:100%; }}
+
+.group-title{{
+  font-weight:800; color:{PRIMARY}; margin:4px 0 8px 4px; letter-spacing:.2px;
+  font-size: calc(14px * var(--ui-scale));
+}}
+
+/* Lane + layout */
+.lane{{
+  display:flex; align-items:center; flex-wrap:nowrap;
+  gap:14px; padding:10px 8px 14px 8px;
+  border-radius:12px; background:#FAFDFF;
+  border:1px dashed rgba(79,121,177,0.18);
+  overflow-x:hidden;
+}}
+
+/* Pills */
+.node-wrap{{ position:relative; display:inline-flex; flex:0 0 auto; }}
+
+.node-pill{{
+  display:inline-flex; align-items:center; justify-content:center;
+  min-width: calc(170px * var(--ui-scale));   /* slight bump for balance */
+  padding: 0;                                  /* shell has no padding */
+  border-radius: 9999px;
+  font-weight: 700; color: #173044;
+  background: #EEF3F7; border: 1px solid rgba(25,53,74,0.08);
+  line-height: 1.15;
+  transition: background-color .3s ease, color .3s ease;
+}}
+
+/* All interior spacing lives on the label */
+.node-pill .pill-label{{
+  display: inline-block;
+  padding: calc(12px * var(--ui-scale)) calc(20px * var(--ui-scale)); /* text margins */
+  white-space: nowrap;
+  text-align: center;
+}}
+
+/* States */
+.node-pill.pending  {{ background:#EEF3F7; color:#41515C; }}
+.node-pill.progress {{ background:{PROGRESS}; color:#132C3C; }}
+.node-pill.success  {{ background:{SUCCESS};  color:#06220E; }}
+.node-pill.error    {{ background:#E74C3C;    color:#fff; }}
+
+/* Arrows */
+.arrow-flex{{
+  flex:1 1 0; display:flex; align-items:center; justify-content:center;
+  min-width: calc(24px * var(--ui-scale));
+  font-size: calc(22px * var(--ui-scale));
+  color: rgba(60,84,96,0.65); user-select:none;
+}}
+.arrow-back{{ color:#E74C3C; text-shadow:0 0 8px rgba(231,76,60,.22); }}
+.arrow-back.pulse{{ animation:backpulse .9s ease-in-out infinite; }}
+@keyframes backpulse{{ 0%{{transform:translateY(0)}} 50%{{transform:translateY(-1px)}} 100%{{transform:translateY(0)}}}}
+
+/* Retry badges + event chips */
+.retry-badge{{
+  position:absolute; top:-8px; right:-8px;
+  background:#E74C3C; color:#fff; font-weight:800;
+  border-radius:10px; padding:2px 6px; font-size:11px; line-height:1;
+  box-shadow:0 4px 10px rgba(231,76,60,0.28);
+}}
+.retry-scar{{
+  position:absolute; top:-6px; right:-6px; width:10px; height:10px; border-radius:50%;
+  background:#A8B6C8; box-shadow:0 0 0 2px rgba(168,182,200,0.25);
+}}
+.event-row{{ margin:6px 2px 0; display:flex; gap:8px; flex-wrap:wrap; }}
+.event-chip{{
+  background:#F3F7FD; color:#435768; border:1px solid rgba(22,50,74,0.10);
+  padding:4px 8px; border-radius:999px; font-size:12px; font-weight:700;
+}}
+.event-chip .red{{ color:#E74C3C; }} .event-chip .green{{ color:#2E7D32; }}
+</style>
+"""
+st.markdown(PIPELINE_CSS, unsafe_allow_html=True)
+
 
 UPLOAD_CSS = f"""
 <style>
@@ -742,20 +730,6 @@ OCCUPANCY_CSS = f"""
 .seg.on {{ background: {PRIMARY_DARK}; }}
 </style>
 """
-# Ensure ERROR color exists
-if "ERROR" not in globals(): ERROR = "#E74C3C"
-
-LANE_RETRY_CSS = f"""
-<style>
-.node-pill.error    {{ background:{ERROR}; color:#fff; }}
-.node-pill.retrying {{ background:#FACC15; color:#3A2B00; }}
-/* Curved dashed retry arrow under the lane */
-.retry-wrap {{ position: relative; height: 40px; margin: -6px 0 8px 0; }}
-.retry-svg  {{ width: 100%; height: 100%; }}
-.retry-path {{ fill: none; stroke: {ERROR}; stroke-width: 3; stroke-dasharray: 6 6; opacity: .85; }}
-</style>
-"""
-st.markdown(LANE_RETRY_CSS, unsafe_allow_html=True)
 
 st.markdown(OCCUPANCY_CSS, unsafe_allow_html=True)
 
@@ -766,8 +740,6 @@ st.markdown(FIX_GHOST_SELECT_INPUT, unsafe_allow_html=True)
 st.markdown(FIX_SELECTBOX_CSS, unsafe_allow_html=True)
 
 st.markdown(UPLOAD_CSS, unsafe_allow_html=True)
-
-st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
 
 st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
 
@@ -785,73 +757,6 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("""
-<style>
-/* Retry arrow styling */
-.retry-wrap{ position:relative; height:42px; margin:-8px 0 6px 0; }
-.retry-svg { width:100%; height:100%; overflow:visible; }
-.retry-glow{ fill:none; stroke:rgba(231,76,60,0.18); stroke-width:7; }
-.retry-path{ fill:none; stroke:#E74C3C; stroke-width:2.6; stroke-dasharray:5 4; stroke-linecap:round; }
-.retry-head{ fill:#E74C3C; }
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<style>
-/* Wrap the lane and reserve a clean band for the retry overlay */
-.lane-wrap{
-  position: relative;
-  padding-bottom: 26px;    /* space for the arrow */
-}
-
-/* Keep pills nice, but hide horizontal scrollbar to avoid the gray track */
-.lane{
-  display:flex; align-items:center; gap:14px; flex-wrap:nowrap;
-  padding:10px 8px 14px 8px; border-radius:12px;
-  background:#FAFDFF; border:1px dashed rgba(79,121,177,0.18);
-  min-width: 960px;
-  overflow-x:hidden;        /* <— key: no scroll track showing */
-}
-
-/* Arrow overlay sits below the lane, full width, not clickable */
-.retry-overlay{
-  position:absolute; left:0; right:0; bottom:2px; height:22px;
-  pointer-events:none;
-}
-.retry-svg{ width:100%; height:100%; overflow:visible; }
-
-/* Pretty arrow */
-.retry-glow{ fill:none; stroke:rgba(231,76,60,0.18); stroke-width:7; }
-.retry-path{ fill:none; stroke:#E74C3C; stroke-width:2.6; stroke-dasharray:5 4; stroke-linecap:round; }
-.retry-head{ fill:#E74C3C; }
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<style>
-/* Board uses all the space Streamlit gives it */
-.board{ width:100%; }
-
-/* Lane: no horizontal scroll, arrows become flexible spacers */
-.lane{
-  display:flex; align-items:center; flex-wrap:nowrap;
-  gap:0; padding:10px 8px 14px 8px;
-  border-radius:12px; background:#FAFDFF;
-  border:1px dashed rgba(79,121,177,0.18);
-  overflow-x:hidden;
-}
-.node-wrap{ flex:0 0 auto; }              /* pills keep natural width */
-.arrow-flex{
-  flex:1 1 0; display:flex; align-items:center; justify-content:center;
-  color:rgba(60,84,96,0.65); user-select:none; min-width:24px;
-}
-
-/* temporary backward arrow you already use */
-.arrow-back{ color:#E74C3C; text-shadow:0 0 8px rgba(231,76,60,.22); }
-.arrow-back.pulse{ animation:backpulse .9s ease-in-out infinite; }
-@keyframes backpulse{ 0%{transform:translateY(0)} 50%{transform:translateY(-1px)} 100%{transform:translateY(0)} }
-</style>
-""", unsafe_allow_html=True)
 
 
 # -------------------------------
