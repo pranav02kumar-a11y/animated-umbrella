@@ -372,18 +372,16 @@ st.markdown("""
 
 st.markdown(LANE_BASE_CSS, unsafe_allow_html=True)
 
-import html
-
 def lane_html(
     title,
     nodes,
     states,
     retry_badges=None,
     events_html="",
-    back_edge_idx=None,     # ← index of arrow between nodes[i] and nodes[i+1]
-    back_live=False,        # ← make it pulse while retrying
+    back_edge_idx=None,   # edge index between nodes[i] and nodes[i+1]
+    back_live=False,
 ):
-    # Pills (with optional badges/scars)
+    # pills (with optional badges/scars)
     pill_wrapped = []
     for i, (label, s) in enumerate(zip(nodes, states)):
         pill = f'<div class="node-pill {s}">{html.escape(label)}</div>'
@@ -396,16 +394,16 @@ def lane_html(
                 badge = f'<span class="retry-scar" title="{html.escape(b.get("title","1 retry"))}"></span>'
         pill_wrapped.append(f'<span class="node-wrap">{pill}{badge}</span>')
 
-    # Interleave arrows (forward by default; one edge can be backward/red)
+    # interleave with elastic arrows (arrow spans grow to fill width)
     segments = []
     for i in range(len(nodes)):
         segments.append(pill_wrapped[i])
         if i < len(nodes) - 1:
             if back_edge_idx is not None and i == back_edge_idx:
-                cls = "arrow-back pulse" if back_live else "arrow-back"
+                cls = "arrow-flex arrow-back pulse" if back_live else "arrow-flex arrow-back"
                 segments.append(f'<span class="{cls}">←</span>')
             else:
-                segments.append('<span class="arrow">→</span>')
+                segments.append('<span class="arrow-flex">→</span>')
 
     html_lane = (
         '<div class="group-title">' + html.escape(title) + '</div>'
@@ -829,6 +827,32 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+st.markdown("""
+<style>
+/* Board uses all the space Streamlit gives it */
+.board{ width:100%; }
+
+/* Lane: no horizontal scroll, arrows become flexible spacers */
+.lane{
+  display:flex; align-items:center; flex-wrap:nowrap;
+  gap:0; padding:10px 8px 14px 8px;
+  border-radius:12px; background:#FAFDFF;
+  border:1px dashed rgba(79,121,177,0.18);
+  overflow-x:hidden;
+}
+.node-wrap{ flex:0 0 auto; }              /* pills keep natural width */
+.arrow-flex{
+  flex:1 1 0; display:flex; align-items:center; justify-content:center;
+  color:rgba(60,84,96,0.65); user-select:none; min-width:24px;
+}
+
+/* temporary backward arrow you already use */
+.arrow-back{ color:#E74C3C; text-shadow:0 0 8px rgba(231,76,60,.22); }
+.arrow-back.pulse{ animation:backpulse .9s ease-in-out infinite; }
+@keyframes backpulse{ 0%{transform:translateY(0)} 50%{transform:translateY(-1px)} 100%{transform:translateY(0)} }
+</style>
+""", unsafe_allow_html=True)
+
 
 # -------------------------------
 # NAV STATE
@@ -964,7 +988,7 @@ def render_fanout(documents, states):
             f'<div class="doc-chip">'
             f'<h5 title="{fn}">{fn}</h5>'
             f'<div class="doc-meta">Type: {dt}</div>'
-            f'<div class="doc-meta">Biz Date: {bd}</div>'
+            f'<div class="doc-meta">Business Date: {bd}</div>'
             f'<span class="status-pill {s}">{status_txt}</span>'
             f'</div>'
         )
