@@ -5,6 +5,8 @@ import base64
 from datetime import datetime
 import html, random
 import time as _time
+# import requests
+# from auth import get_authenticated_headers
 
 def mock_fetch_intent_result(intent: str) -> dict:
     """Mock of your API result. Replace with the real call later."""
@@ -40,6 +42,11 @@ def mock_fetch_intent_result(intent: str) -> dict:
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
+# def get_intent_result(intent, risk_party_id, review_id):
+#     headers = get_authenticated_headers()
+#     base_url = "url"
+#     response = requests.get(f"{base_url}/{risk_party_id}/{review_id}/{intent}", headers=headers)
+
 def make_snippet(text: str, limit: int = 280) -> str:
     text = (text or "").strip()
     if len(text) <= limit: 
@@ -57,9 +64,6 @@ TRIGGER_START_AFTER = 2   # start Trigger Evaluation once this many docs are ing
 # --- Bulk ingest failure config ---
 BULK_FAIL_THRESHOLD = 2     # trigger the failure path when total docs > this
 BULK_FAIL_DOC_INDEX = 1     # 0-based index of the doc that fails once (2 => 3rd doc)
-
-
-
 
 # --- Per-stage timings (seconds) ---
 SIM = {
@@ -82,11 +86,11 @@ SIM.update({
     "ai_advance":  0.60,   # move payloads to next stage
     "ai_settle":   0.35,   # small settle after each hop
 })
-
+ 
 
 
 # Optional global multiplier for quick tuning (e.g., 1.0 normal, 1.5 slower, 2.0 slowest)
-SPEED_FACTOR = 1.75
+SPEED_FACTOR = 1.0
 
 # Use existing sleep_step for smooth repaint; fall back if missing
 def _sleep_smooth(seconds: float):
@@ -103,11 +107,6 @@ def wait(key: str):
     dur = SIM[key] * SPEED_FACTOR
     _sleep_smooth(dur)
 
-def _fanout_height(n_docs: int) -> int:
-    # ~110px per card row + chrome
-    rows = max(1, (n_docs + 2) // 3)  # 3 cards per row typical
-    return 120 + rows * 120
-
 import random
 random.seed(7)  # deterministic demo; change/remove for more variety
 
@@ -122,8 +121,6 @@ def _stage_duration(stage: int) -> float:
     jitter = random.uniform(0.75, 1.35)
     return base * jitter * SPEED_FACTOR
 
-
- 
 DATE_RE = re.compile(r"^(?:\d{4}|Q[1-4]\d{4})$")  # 2024 or Q22024
 
 def is_valid_business_date(s: str) -> bool:
@@ -148,21 +145,17 @@ TEXT_DARK      = "#16324A"
 ERROR          = "#E74C3C"
 PENDING        = "#98A6B3"
 SUCCESS        = "#34C759"
-PROGRESS       = "#FF9500"
+PROGRESS       = "#F4C542"
 
-
-# Document Processing nodes
-if "DOC_NODES" not in globals():
-    DOC_NODES = [
+DOC_NODES = [
         "Document Upload",
         "S3 Upload",
         "Section Coverage Analysis",
         "Proxy Document Retriever",
         "Async DB Ingestion",
-        "Trigger Evaluation",
+        "Trigger Evaluation", 
     ]
 
-# Credit AI nodes (stacked pipeline under Document Processing)
 AI_NODES = [
     "Receive Generation Payloads",
     "Prompt Manager",
@@ -176,61 +169,66 @@ AI_NODES = [
 PAYLOAD_SECTION_NAMES = ["Business Description", "Recent Developments", "ABL"]
 TOTAL_INTENTS = len(PAYLOAD_SECTION_NAMES)  # = 3
 
-# Smooth UI repaint sleep
-if "sleep_step" not in globals():
-    def sleep_step(seconds: float):
-        seconds *= SIM_SPEED            # << scale all waits here
-        steps = int(seconds * 5)
-        for _ in range(steps):
-            _time.sleep(seconds / steps)
-
-def _ai_counts(payloads_idx, n_nodes):
-    counts = [0]*n_nodes
-    for idx in payloads_idx:
-        # clamp in case something already finished
-        j = min(idx, n_nodes-1)
-        counts[j] += 1
-    return counts
-
 def _ai_counts(payloads_idx, n_nodes):
     counts = [0]*n_nodes
     for idx in payloads_idx:
         counts[min(idx, n_nodes-1)] += 1
     return counts
 
-def _paint_ai_lane(ai_lane_area, payloads_idx):
+def _paint_ai_lane(
+    ai_lane_area,
+    payloads_idx,
+    retry_badges=None,
+    event_chips=None,
+    back_edge_idx=None,
+    back_live=False,
+    override_states=None,
+):
     last = len(AI_NODES) - 1
     counts = _ai_counts(payloads_idx, len(AI_NODES))
-
     states, labels = [], []
+
     for j, name in enumerate(AI_NODES):
-        at_j   = counts[j]                         # how many are exactly at node j
-        after  = sum(1 for x in payloads_idx if x > j)
-
-        if j == last:
-            # last node: success when everyone has arrived (>= last),
-            # progress while some are arriving.
-            if all(x >= last for x in payloads_idx):
-                state = "success"
-            elif at_j > 0:
-                state = "progress"
-            else:
-                state = "pending"
+        if override_states and j in override_states:
+            state = override_states[j]
         else:
-            # intermediate nodes: success when everyone has moved beyond,
-            # progress if anyone is currently here.
-            if after == len(payloads_idx):
-                state = "success"
-            elif at_j > 0:
-                state = "progress"
+            at_j  = counts[j]
+            after = sum(1 for x in payloads_idx if x > j)
+            if j == last:
+                state = "success" if all(x >= last for x in payloads_idx) else ("progress" if at_j > 0 else "pending")
             else:
-                state = "pending"
-
+                state = "success" if after == len(payloads_idx) else ("progress" if at_j > 0 else "pending")
         states.append(state)
-        labels.append(name)  # no counters on the pills
+        labels.append(name)
 
-    html = f'<div class="board">{lane_html("🤖 Credit AI", labels, states)}</div>'
-    ai_lane_area.markdown(html, unsafe_allow_html=True)
+    events_html = "".join(f'<span class="event-chip">{c}</span>' for c in (event_chips or []))
+    html_block = (
+        '<div class="board">' +
+        lane_html(
+            "Credit AI",
+            labels,
+            states,
+            retry_badges=retry_badges,
+            events_html=events_html,
+            back_edge_idx=back_edge_idx,
+            back_live=back_live,
+        ) +
+        '</div>'
+    )
+    ai_lane_area.markdown(html_block, unsafe_allow_html=True)
+
+
+    chips_html = "".join(event_chips or [])
+    html_lane = lane_html(
+        "Credit AI",
+        labels,
+        states,
+        retry_badges=retry_badges,
+        events_html=chips_html,
+        back_edge_idx=back_edge_idx,
+        back_live=back_live,
+    )
+    ai_lane_area.markdown(f'<div class="board">{html_lane}</div>', unsafe_allow_html=True)
 
 
 def _render_occupancy_row(payloads_idx, total_payloads):
@@ -241,19 +239,24 @@ def _render_occupancy_row(payloads_idx, total_payloads):
         cells.append(f'<div class="occ-cell">{dots}</div>')
     return f'<div class="occ-strip">{"".join(cells)}</div>'
 
-def _render_payload_cards(names, idxs, results_map):
+def _render_payload_cards(names, idxs, results_map, card_overrides=None):
+    card_overrides = card_overrides or {}
     last = len(AI_NODES) - 1
     cards = []
     for name, idx in zip(names, idxs):
         segs = ''.join(f'<span class="seg {"on" if s <= idx else ""}"></span>' for s in range(len(AI_NODES)))
         at_name = AI_NODES[min(idx, last)]
         done = idx >= last
-        pill = "success" if done else "progress"
-        if done and name in results_map:
+
+        ov = card_overrides.get(name, {})
+        pill = ov.get("pill") or ("success" if done else "progress")
+
+        # Body text: allow an override line (e.g., "Retrying via Context")
+        if done and name in results_map and not ov.get("at"):
             res = results_map[name]
-            ts = html.escape(res.get("timestamp",""))
-            full = html.escape(res.get("llm_response",""))
-            snippet = html.escape(make_snippet(res.get("llm_response","")))
+            ts = html.escape(res.get("timestamp", ""))
+            full = html.escape(res.get("llm_response", ""))
+            snippet = html.escape(make_snippet(res.get("llm_response", "")))
             body = (
                 f'<div class="doc-meta">Delivered • {ts}</div>'
                 f'<div class="doc-meta">{snippet}</div>'
@@ -261,21 +264,151 @@ def _render_payload_cards(names, idxs, results_map):
                 f'<div class="fulltext">{full}</div></details>'
             )
         else:
-            body = f'<div class="doc-meta">At: {html.escape(at_name)}</div>'
+            at_line = ov.get("at") or f'At: {html.escape(at_name)}'
+            body = f'<div class="doc-meta">{html.escape(at_line)}</div>'
+
         cards.append(
             f'<div class="doc-chip">'
             f'<h5>{html.escape(name)}</h5>'
             f'{body}'
             f'<div class="segbar">{segs}</div>'
-            f'<span class="status-pill {pill}">{"Done" if done else "Processing"}</span>'
+            f'<span class="status-pill {pill}">{"Done" if pill=="success" else ("Retrying…" if pill=="retrying" else ("Error" if pill=="error" else "Processing"))}</span>'
             f'</div>'
         )
+
     return (
         '<div class="fanout-card">'
         '<div class="fanout-title">Per-intent payloads (parallel)</div>'
         f'<div class="doc-grid">{"".join(cards)}</div>'
         '</div>'
     )
+
+st.markdown("""
+<style>
+/* --- Review page: hide rogue unlabeled TextInput (prevents blank full-width pill) --- */
+.form-card [data-testid="stTextInput"]:has([data-testid="stWidgetLabel"] p:empty) {
+  display: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+}
+/* Be safe: if the label exists but is whitespace-only, hide it too */
+.form-card [data-testid="stWidgetLabel"] p:empty { display:none !important; }
+</style>
+""", unsafe_allow_html=True)
+
+LANE_BASE_CSS = f""" 
+<style>
+.board {{
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid rgba(22, 50, 74, 0.08);
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(22, 50, 74, 0.08);
+  padding: 14px 16px;
+}}
+.group-title {{
+  font-weight: 800; color: {PRIMARY}; margin: 4px 0 8px 4px; letter-spacing: .2px;
+}}
+.lane {{
+  display: flex; align-items: center; gap: 14px; flex-wrap: nowrap;
+  overflow-x: auto; padding: 10px 8px 14px 8px; border-radius: 12px;
+  background: #FAFDFF; border: 1px dashed rgba(79, 121, 177, 0.18);
+}}
+.node-wrap {{ position: relative; display: inline-block; }}
+.node-pill {{
+  flex-shrink: 0; min-width: 160px; text-align: center; white-space: nowrap;
+  padding: 10px 14px; border-radius: 999px; font-weight: 700; color: #173044;
+  background: #EEF3F7; border: 1px solid rgba(25, 53, 74, 0.08);
+  transition: background-color .6s ease, box-shadow .6s ease, border-color .6s ease, color .6s ease;
+}}
+.node-pill.pending  {{ background: #EEF3F7; color: #41515C; }}
+.node-pill.progress {{ background: {PROGRESS}; color: #132C3C; }}
+.node-pill.success  {{ background: {SUCCESS};  color: #06220E;  }}
+
+.arrow-flex {{
+  flex: 1 1 0; display: flex; align-items: center; justify-content: center;
+  min-width: 24px; font-size: 22px; color: rgba(60,84,96,0.65); user-select: none;
+}}
+.arrow-back {{ color:#E74C3C; text-shadow:0 0 8px rgba(231,76,60,0.22); }}
+.arrow-back.pulse {{ animation: backpulse .9s ease-in-out infinite; }}
+
+@keyframes backpulse {{
+  0%   {{ transform: translateY(0); }}
+  50%  {{ transform: translateY(-1px); }}
+  100% {{ transform: translateY(0); }}
+}}
+</style>
+"""
+
+st.markdown(LANE_BASE_CSS, unsafe_allow_html=True)
+
+BADGES_AND_EVENTS_CSS = f"""
+<style>
+/* Anchor badges to each pill */
+.node-wrap {{ position: relative; display: inline-block; }}
+
+.retry-badge {{
+  position: absolute; top: -8px; right: -8px;
+  background: {ERROR}; color: #fff; font-weight: 800;
+  border-radius: 10px; padding: 2px 6px; font-size: 11px; line-height: 1;
+  box-shadow: 0 4px 10px rgba(231,76,60,0.28);
+}}
+
+.retry-scar {{
+  position: absolute; top: -6px; right: -6px;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: #A8B6C8; box-shadow: 0 0 0 2px rgba(168,182,200,0.25);
+}}
+
+/* Row of event chips under the lane */
+.event-row {{ margin: 6px 2px 0; display: flex; gap: 8px; flex-wrap: wrap; }}
+.event-chip {{
+  background:#F3F7FD; color:#435768; border:1px solid rgba(22,50,74,0.10);
+  padding: 4px 8px; border-radius: 999px; font-size:12px; font-weight:700;
+}}
+.event-chip .red   {{ color: {ERROR}; }}
+.event-chip .green {{ color: #2E7D32; }}
+</style>
+"""
+st.markdown(BADGES_AND_EVENTS_CSS, unsafe_allow_html=True)
+
+st.markdown("""
+<style>
+/* Make "Retrying…" pills red (card-level only) */
+.status-pill.retrying { background:#E74C3C; color:#ffffff; }
+.status-pill.error    { background:#E74C3C; color:#ffffff; }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<style>
+/* Soft pulse for in-progress lane nodes (affects both pipelines) */
+@keyframes pillPulse {
+  0%   { transform: translateZ(0) scale(1.00); box-shadow: 0 0 0 0 rgba(255,149,0,.35); }
+  50%  { transform: translateZ(0) scale(1.035); box-shadow: 0 0 0 7px rgba(255,149,0,.10); }
+  100% { transform: translateZ(0) scale(1.00); box-shadow: 0 0 0 0 rgba(255,149,0,0); }
+}
+.node-pill.progress {
+  animation: pillPulse 1.25s ease-in-out infinite;
+  will-change: transform, box-shadow;
+  border-color: rgba(255,149,0,.55);
+}
+
+/* If you ever mark a lane node as "retrying", give it the same pulse */
+.node-pill.retrying {
+  animation: pillPulse 1.25s ease-in-out infinite;
+  will-change: transform, box-shadow;
+}
+
+/* Respect reduced motion prefs */
+@media (prefers-reduced-motion: reduce) {
+  .node-pill.progress,
+  .node-pill.retrying { animation: none; }
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 
 def lane_html(
     title,
@@ -289,11 +422,7 @@ def lane_html(
     # pills (with optional badges/scars)
     pill_wrapped = []
     for i, (label, s) in enumerate(zip(nodes, states)):
-        pill = (
-          f'<div class="node-pill {s}">'
-          f'  <span class="pill-label">{html.escape(label)}</span>'
-          f'</div>'
-      )
+        pill = f'<div class="node-pill {s}">{html.escape(label)}</div>'
         badge = ""
         if retry_badges and i in retry_badges:
             b = retry_badges[i]
@@ -380,91 +509,6 @@ GLOBAL_CSS = f"""
 }}
 </style>
 """
-
-PIPELINE_CSS = f"""
-<style>
-:root{{
-  /* keep a simple global scale for big screens */
-  --ui-scale: clamp(1, 0.9 + (100vw - 1200px)/1200, 1.6);
-}}
-
-.board{{ width:100%; }}
-
-.group-title{{
-  font-weight:800; color:{PRIMARY}; margin:4px 0 8px 4px; letter-spacing:.2px;
-  font-size: calc(14px * var(--ui-scale));
-}}
-
-/* Lane + layout */
-.lane{{
-  display:flex; align-items:center; flex-wrap:nowrap;
-  gap:14px; padding:10px 8px 14px 8px;
-  border-radius:12px; background:#FAFDFF;
-  border:1px dashed rgba(79,121,177,0.18);
-  overflow-x:hidden;
-}}
-
-/* Pills */
-.node-wrap{{ position:relative; display:inline-flex; flex:0 0 auto; }}
-
-.node-pill{{
-  display:inline-flex; align-items:center; justify-content:center;
-  min-width: calc(170px * var(--ui-scale));   /* slight bump for balance */
-  padding: 0;                                  /* shell has no padding */
-  border-radius: 9999px;
-  font-weight: 700; color: #173044;
-  background: #EEF3F7; border: 1px solid rgba(25,53,74,0.08);
-  line-height: 1.15;
-  transition: background-color .3s ease, color .3s ease;
-}}
-
-/* All interior spacing lives on the label */
-.node-pill .pill-label{{
-  display: inline-block;
-  padding: calc(12px * var(--ui-scale)) calc(20px * var(--ui-scale)); /* text margins */
-  white-space: nowrap;
-  text-align: center;
-}}
-
-/* States */
-.node-pill.pending  {{ background:#EEF3F7; color:#41515C; }}
-.node-pill.progress {{ background:{PROGRESS}; color:#132C3C; }}
-.node-pill.success  {{ background:{SUCCESS};  color:#06220E; }}
-.node-pill.error    {{ background:#E74C3C;    color:#fff; }}
-
-/* Arrows */
-.arrow-flex{{
-  flex:1 1 0; display:flex; align-items:center; justify-content:center;
-  min-width: calc(24px * var(--ui-scale));
-  font-size: calc(22px * var(--ui-scale));
-  color: rgba(60,84,96,0.65); user-select:none;
-}}
-.arrow-back{{ color:#E74C3C; text-shadow:0 0 8px rgba(231,76,60,.22); }}
-.arrow-back.pulse{{ animation:backpulse .9s ease-in-out infinite; }}
-@keyframes backpulse{{ 0%{{transform:translateY(0)}} 50%{{transform:translateY(-1px)}} 100%{{transform:translateY(0)}}}}
-
-/* Retry badges + event chips */
-.retry-badge{{
-  position:absolute; top:-8px; right:-8px;
-  background:#E74C3C; color:#fff; font-weight:800;
-  border-radius:10px; padding:2px 6px; font-size:11px; line-height:1;
-  box-shadow:0 4px 10px rgba(231,76,60,0.28);
-}}
-.retry-scar{{
-  position:absolute; top:-6px; right:-6px; width:10px; height:10px; border-radius:50%;
-  background:#A8B6C8; box-shadow:0 0 0 2px rgba(168,182,200,0.25);
-}}
-.event-row{{ margin:6px 2px 0; display:flex; gap:8px; flex-wrap:wrap; }}
-.event-chip{{
-  background:#F3F7FD; color:#435768; border:1px solid rgba(22,50,74,0.10);
-  padding:4px 8px; border-radius:999px; font-size:12px; font-weight:700;
-}}
-.event-chip .red{{ color:#E74C3C; }} .event-chip .green{{ color:#2E7D32; }}
-</style>
-"""
-st.markdown(PIPELINE_CSS, unsafe_allow_html=True)
-
-
 UPLOAD_CSS = f"""
 <style>
 /* Force light app background even in dark mode */
@@ -551,7 +595,6 @@ UPLOAD_CSS = f"""
 }}
 </style>
 """
-
 FIX_SELECTBOX_CSS = f"""
 <style>
 /* --- Text inputs only (leave selectbox out of this) --- */
@@ -656,6 +699,7 @@ div[data-baseweb="select"] input {{
 [data-baseweb="select"] svg {{ color: {PRIMARY_DARK} !important; }}
 </style>
 """
+
 FANOUT_CSS = f"""
 <style>
 /* Fan-out card */
@@ -731,6 +775,18 @@ OCCUPANCY_CSS = f"""
 </style>
 """
 
+LANE_RETRY_CSS = f"""
+<style>
+.node-pill.error   {{ background: {ERROR}; color: #fff; }}
+.node-pill.retrying {{ background:#FACC15; color: #3A2B00;}}
+/* Curved dashed retry arrow under the lane */
+.retry-wrap {{ position: relative; height: 40px; margin: -6px 0 8px 0;}}
+.retry-svg {{ width: 100%; height: 100%;}}
+.retry-path {{ fill: none; stroke: {ERROR}; stroke-width: 3; stroke-dasharray: 6 6;opacity: .85;}}
+</style>"""
+
+st.markdown(LANE_RETRY_CSS, unsafe_allow_html=True)
+
 st.markdown(OCCUPANCY_CSS, unsafe_allow_html=True)
 
 st.markdown(FANOUT_CSS, unsafe_allow_html=True)
@@ -756,8 +812,6 @@ st.markdown(f"""
 }}
 </style>
 """, unsafe_allow_html=True)
-
-
 
 # -------------------------------
 # NAV STATE
@@ -881,8 +935,6 @@ def page_upload():
         st.session_state.page = "process"  # temp: send to placeholder
         st.rerun()
 
-import html
-
 def render_fanout(documents, states):
     def card(d, s):
         fn = html.escape(d.get("file_name",""))
@@ -938,7 +990,7 @@ def page_process():
           labels[5] = f"Trigger Evaluation  {payloads}/{payloads_total}"
 
       html_lane = lane_html(
-          "📄 Document Processing",
+          "Document Processing",
           labels,
           dp_states,
           retry_badges=retry_badges,
@@ -982,7 +1034,8 @@ def page_process():
           # Step 1: Async DB error + show live badge + flip arrow backward (Proxy←Async)
           dp_states[4] = "error"
           retry_badges[4] = {"type": "live", "label": "↶", "title": "Retrying via Proxy"}
-          event_chips.append('<span class="red">↶</span> Async DB → Proxy')
+          event_chips.append('<span class="red">↑</span> Async DB → Proxy')
+
           arrow_back_idx  = 3        # edge between nodes[3] and nodes[4]
           arrow_back_live = True     # pulse while retrying
           paint_lane(ingested=done, total=len(docs))
@@ -1082,69 +1135,222 @@ def page_process():
                payloads=payloads_sent, payloads_total=TOTAL_INTENTS)
     wait("tr_finish")
 
-        # ===== CREDIT AI (happy path, asynchronous per-payload) =====
+        # ===== CREDIT AI (with ABL retry if fail.pdf present) =====
     st.subheader("Credit AI")
+
+    # UI areas
     ai_lane_area  = st.empty()
     occ_area      = st.empty()
     payloads_area = st.empty()
-    results_map   = {}   # name -> result dict (llm_response, timestamp, etc.)
 
-    payloads_names = PAYLOAD_SECTION_NAMES[:]                 # ["Business Description","Recent Developments","ABL"]
-    payloads_idx   = [0] * TOTAL_INTENTS                      # current node index per payload (0..last)
+    # Data/result state
+    results_map   = {}
+    payloads_names = PAYLOAD_SECTION_NAMES[:]   # ["Business Description","Recent Developments","ABL"]
+    payloads_idx   = [0] * TOTAL_INTENTS
     last_idx       = len(AI_NODES) - 1
 
+    # --- visuals state for retry UX on the AI lane ---
+    card_overrides      = {}   # per-card pill/line overrides
+    ai_retry_badges     = {}   # node index -> {type:"live"/"scar", ...}
+    ai_event_chips      = []   # plain strings; rendered as chips in paint_ai()
+    ai_arrow_back_idx   = None # which edge to show back arrow (i between nodes[i] and nodes[i+1])
+    ai_arrow_back_live  = False
+    ai_state_overrides  = {}   # node index -> "error"/"progress"/"success" (overrides lane state)
+
+    # --- detect trigger: any uploaded file literally named "fail.pdf" ---
+    docs = st.session_state.get("payload", {}).get("documents", [])
+    credit_fail_active   = any((d.get("file_name","").lower() == "fail.pdf") for d in docs)
+    credit_fail_consumed = False
+    try:
+        abl_payload_index = payloads_names.index("ABL")
+    except ValueError:
+        abl_payload_index = None
+
+    # ---- helpers ---------------------------------------------------------------
+    def _ai_states_from_payloads(idxs, override_states=None):
+        """Compute lane node states from payload positions with optional per-node overrides."""
+        override_states = override_states or {}
+        counts = _ai_counts(idxs, len(AI_NODES))
+        last   = len(AI_NODES) - 1
+        states = []
+        for j in range(len(AI_NODES)):
+            if j in override_states:
+                states.append(override_states[j])
+                continue
+            at_j  = counts[j]
+            after = sum(1 for x in idxs if x > j)
+            if j == last:
+                state = "success" if all(x >= last for x in idxs) else ("progress" if at_j > 0 else "pending")
+            else:
+                state = "success" if after == len(idxs) else ("progress" if at_j > 0 else "pending")
+            states.append(state)
+        return states
+
+    def paint_ai():
+        """One paint for lane + occupancy + cards (chips are styled like the ingest lane)."""
+        states      = _ai_states_from_payloads(payloads_idx, ai_state_overrides)
+        labels      = AI_NODES[:]
+        events_html = "".join(f'<span class="event-chip">{c}</span>' for c in ai_event_chips)
+
+        lane_html_block = lane_html(
+            "Credit AI",
+            labels,
+            states,
+            retry_badges=ai_retry_badges,
+            events_html=events_html,
+            back_edge_idx=ai_arrow_back_idx,
+            back_live=ai_arrow_back_live,
+        )
+        ai_lane_area.markdown(f'<div class="board">{lane_html_block}</div>', unsafe_allow_html=True)
+        occ_area.markdown(_render_occupancy_row(payloads_idx, TOTAL_INTENTS), unsafe_allow_html=True)
+        payloads_area.markdown(
+            _render_payload_cards(payloads_names, payloads_idx, results_map, card_overrides),
+            unsafe_allow_html=True
+        )
+
     # Initial paint
-    _paint_ai_lane(ai_lane_area, payloads_idx)
-    occ_area.markdown(_render_occupancy_row(payloads_idx, TOTAL_INTENTS), unsafe_allow_html=True)
-    payloads_area.markdown(_render_payload_cards(payloads_names, payloads_idx, results_map), unsafe_allow_html=True)
+    paint_ai()
 
-
-    # Set up per-payload ETAs to finish their current stage
-    # (time to move from idx -> idx+1). If a payload is already at last_idx, ETA=inf.
+    # Per-payload ETAs to finish current stage (idx -> idx+1)
     INF  = 10**9
     etas = [_stage_duration(0) for _ in range(TOTAL_INTENTS)]
 
-    # Event loop: at each step, advance the payload with the smallest ETA
+    # ---- event loop ------------------------------------------------------------
     while True:
-        # check if all delivered
         if all(i >= last_idx for i in payloads_idx):
             break
 
-        # pick next event (payload that finishes its current stage first)
+        # next event: payload with smallest ETA among those not delivered
         active = [(p, t) for p, t in enumerate(etas) if payloads_idx[p] < last_idx]
         p_next, dt = min(active, key=lambda x: x[1])
 
-        # wait dt and subtract from others so clocks stay in sync
         _sleep_smooth(dt)
         for p in range(TOTAL_INTENTS):
             if payloads_idx[p] < last_idx:
                 etas[p] = max(0.0, etas[p] - dt)
 
-        # advance that payload one stage
+        # advance the chosen payload one stage
         payloads_idx[p_next] += 1
+
         if payloads_idx[p_next] < last_idx:
-            # set ETA for its new current stage
             etas[p_next] = _stage_duration(payloads_idx[p_next])
         else:
-            etas[p_next] = INF  # delivered; no more events
+            etas[p_next] = INF  # delivered
             name = payloads_names[p_next]
             if name not in results_map:
-              results_map[name] = mock_fetch_intent_result(name)
+                results_map[name] = mock_fetch_intent_result(name)
 
-        # repaint after the event
-        _paint_ai_lane(ai_lane_area, payloads_idx)
-        occ_area.markdown(_render_occupancy_row(payloads_idx, TOTAL_INTENTS), unsafe_allow_html=True)
-        payloads_area.markdown(_render_payload_cards(payloads_names, payloads_idx, results_map), unsafe_allow_html=True)
+        # --- inject a one-time failure at "Credit AI Invocation" for ABL when fail.pdf uploaded ---
+        # Node indexes: 0 Receive, 1 Prompt, 2 Download, 3 Context, 4 Credit AI Invocation, 5 Output
+        if (
+            credit_fail_active and not credit_fail_consumed
+            and abl_payload_index is not None
+            and p_next == abl_payload_index
+            and payloads_idx[p_next] == 4  # just reached "Credit AI Invocation"
+        ):
+            # 1) Invocation pill shows error + live badge; show animated back arrow to Context
+            ai_state_overrides[4] = "error"
+            ai_retry_badges[4] = {"type": "live", "label": "↶", "title": "Retrying via Context"}
+            ai_event_chips.append('↶ Credit AI → Context • ABL')
+            ai_arrow_back_idx  = 3   # edge between Context (3) and Invocation (4)
+            ai_arrow_back_live = True
+
+            # ABL card shows yellow pill + explicit retry message
+            card_overrides["ABL"] = {"pill": "retrying", "at": "Retrying via Context"}
+
+            paint_ai()
+            _sleep_smooth(SIM.get("ai_progress", 0.80) * SPEED_FACTOR)
+
+            # 2) Re-process prior node (Context) while Invocation stays red
+            ai_state_overrides[3] = "progress"; paint_ai(); _sleep_smooth(SIM.get("ai_settle", 0.35) * SPEED_FACTOR)
+            ai_state_overrides[3] = "success";  paint_ai(); _sleep_smooth(SIM.get("ai_settle", 0.35) * SPEED_FACTOR)
+
+            # 3) Retry succeeds → clear error, keep scar, stop back arrow, log recovery
+            ai_state_overrides.pop(4, None)
+            ai_retry_badges[4] = {"type": "scar", "title": "1 retry on this stage"}
+            ai_event_chips.append('✓ Recovered (ABL)')
+            ai_arrow_back_idx  = None
+            ai_arrow_back_live = False
+            card_overrides.pop("ABL", None)  # remove the temporary yellow pill / line
+
+            credit_fail_consumed = True
+            paint_ai()
+            continue  # still repaint at loop bottom, but we're already fresh
+
+        # Normal repaint after each hop
+        paint_ai()
 
     # final settle & message
     _sleep_smooth(SIM.get("ai_settle", 0.35) * SPEED_FACTOR)
     st.success("All payloads delivered. Output Delivery complete.")
 
-
-
 def page_review():
-  st.header("Review Results")
-  st.info("Placeholder: results review UI coming next.") 
+    st.header("Review Results")
+
+    # Card wrapper like Upload page for consistency
+    st.markdown('<div class="form-card">', unsafe_allow_html=True)
+
+    # Prefill from last payload if available
+    rp_default = st.session_state.get("payload", {}).get("risk_party_id", "")
+    rid_default = st.session_state.get("payload", {}).get("review_id", "")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        rp = st.text_input("Risk Party ID", value=rp_default, key="review_risk_party_id")
+    with col2:
+        rid = st.text_input("Review ID", value=rid_default, key="review_review_id")
+
+    fetch = st.button("Fetch Sections", type="primary", use_container_width=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)  # close form-card
+
+    # Use session cache so the cards persist after first fetch
+    if "review_results" not in st.session_state:
+        st.session_state.review_results = None
+
+    if fetch:
+        if not rp or not rid:
+            st.warning("Please enter both Risk Party ID and Review ID.")
+            return
+        # For now we use the mock function for all three sections
+        results = {name: mock_fetch_intent_result(name) for name in PAYLOAD_SECTION_NAMES}
+        st.session_state.review_results = {
+            "risk_party_id": rp,
+            "review_id": rid,
+            "sections": results
+        }
+
+    if st.session_state.review_results:
+        results = st.session_state.review_results["sections"]
+
+        # Build cards using same visual language as the app
+        def _review_cards_html():
+            cards = []
+            for name in PAYLOAD_SECTION_NAMES:
+                res = results.get(name, {})
+                ts = html.escape(res.get("timestamp", ""))
+                full = html.escape(res.get("llm_response", ""))
+                snippet = html.escape(make_snippet(res.get("llm_response", "")))
+
+                cards.append(
+                    f'<div class="doc-chip">'
+                    f'  <h5>{html.escape(name)}</h5>'
+                    f'  <div class="doc-meta">Delivered • {ts}</div>'
+                    f'  <div class="doc-meta">{snippet}</div>'
+                    f'  <details class="card-details"><summary class="view-link">View full response</summary>'
+                    f'    <div class="fulltext">{full}</div>'
+                    f'  </details>'
+                    f'  <span class="status-pill success">Ready</span>'
+                    f'</div>'
+                )
+            return (
+                '<div class="fanout-card">'
+                '  <div class="fanout-title">Review Sections</div>'
+                f'  <div class="doc-grid">{"".join(cards)}</div>'
+                '</div>'
+            )
+
+        st.markdown(_review_cards_html(), unsafe_allow_html=True)
 
 # -------------------------------
 # ROUTER
@@ -1157,3 +1363,4 @@ elif st.session_state.page == "process":
     page_process()
 elif st.session_state.page == "review":
     page_review()
+
