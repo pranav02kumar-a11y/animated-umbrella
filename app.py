@@ -1561,3 +1561,121 @@ elif st.session_state.page == "process":
 elif st.session_state.page == "review":
     page_review()
 
+"--------------------------"
+from contextlib import contextmanager
+
+# ---- Speed profiles (same idea as before) ----
+SPEED_OVERRIDES = []
+def _apply_overrides(seconds: float, *, kind: str = None, index=None, payload_idx=None, stage_idx=None) -> float:
+    mult = 1.0
+    for ov in SPEED_OVERRIDES:
+        if kind == "dp" and index is not None:
+            mult *= ov.get("dp", {}).get(index, 1.0)
+        elif kind == "fo" and index is not None:
+            mult *= ov.get("fo", {}).get(index, 1.0)
+        elif kind == "ai":
+            if stage_idx is not None:
+                mult *= ov.get("ai", {}).get(stage_idx, 1.0)
+            if payload_idx is not None and stage_idx is not None:
+                mult *= ov.get("ai_per_payload_stage", {}).get((payload_idx, stage_idx), 1.0)
+    return seconds * mult
+
+@contextmanager
+def speed_profile(*, dp=None, fo=None, ai=None, ai_per_payload_stage=None):
+    SPEED_OVERRIDES.append({
+        "dp": dp or {},
+        "fo": fo or {},
+        "ai": ai or {},
+        "ai_per_payload_stage": ai_per_payload_stage or {},
+    })
+    try:
+        yield
+    finally:
+        SPEED_OVERRIDES.pop()
+
+# ---- Context pointers telling wait() what to scale ----
+_CURRENT_DP_NODE = None     # which DP node index is "active" for the next waits
+_CURRENT_FO_DOC  = None     # which doc index is "active" for fanout waits
+
+@contextmanager
+def at_dp_node(node_index: int):
+    global _CURRENT_DP_NODE
+    prev = _CURRENT_DP_NODE
+    _CURRENT_DP_NODE = node_index
+    try:
+        yield
+    finally:
+        _CURRENT_DP_NODE = prev
+
+@contextmanager
+def at_fo_doc(doc_index: int):
+    global _CURRENT_FO_DOC
+    prev = _CURRENT_FO_DOC
+    _CURRENT_FO_DOC = doc_index
+    try:
+        yield
+    finally:
+        _CURRENT_FO_DOC = prev
+
+# ---- PATCH your wait() so it honors the contexts above ----
+def wait(key: str):
+    dur = SIM[key] * SPEED_FACTOR
+    if key.startswith("dp_"):       # scale by active DP node (if any)
+        dur = _apply_overrides(dur, kind="dp", index=_CURRENT_DP_NODE)
+    elif key.startswith("fo_"):     # scale by active doc (if any)
+        dur = _apply_overrides(dur, kind="fo", index=_CURRENT_FO_DOC)
+    _sleep_smooth(dur)
+
+'-------------------------------'
+if failing_active and idx == BULK_FAIL_DOC_INDEX:
+    prev_node = 3  # Proxy Document Retriever
+
+    # Slow Async DB (4), speed Proxy (3). You can also add others here.
+    with speed_profile(dp={4: 1.8, 3: 0.75}, fo={idx: 1.15}):
+        # Step 1: mark error on Async DB and show back arrow
+        dp_states[4] = "error"
+        retry_badges[4] = {"type": "live", "label": "↶", "title": "Retrying via Proxy"}
+        event_chips.append('<span class="red">↑</span> Async DB → Proxy')
+        arrow_back_idx, arrow_back_live = 3, True
+        paint_lane(ingested=done, total=len(docs))
+
+        # Step 2: re-run Proxy (sped up because dp[3]=0.75)
+        dp_states[prev_node] = "progress"; paint_lane(ingested=done, total=len(docs))
+        with at_dp_node(prev_node): wait("dp_progress")
+
+        dp_states[prev_node] = "success";  paint_lane(ingested=done, total=len(docs))
+        with at_dp_node(prev_node): wait("dp_success")
+
+        # Step 3: retry Async DB (slowed because dp[4]=1.8)
+        dp_states[4] = "progress"; paint_lane(ingested=done, total=len(docs))
+        with at_dp_node(4): wait("dp_progress")
+
+        # doc completes
+        doc_states[idx] = "success"; done += 1
+        event_chips.append('<span class="green">✓</span> Recovered')
+        retry_badges[4] = {"type": "scar", "title": "1 retry on this stage"}
+        arrow_back_idx, arrow_back_live = None, False
+
+        paint_lane(ingested=done, total=len(docs))
+        fanout_area.markdown(render_fanout(docs, doc_states), unsafe_allow_html=True)
+        with at_fo_doc(idx): wait("fo_success")
+
+        failing_active = False
+
+        # (rest of your TE handling stays as-is)
+    continue
+
+'-------------------'
+def _stage_duration(stage: int, payload_idx=None) -> float:
+    base = AI_STAGE_BASE[stage]
+    jitter = random.uniform(0.75, 1.35)
+    dur = base * jitter * SPEED_FACTOR
+    return _apply_overrides(dur, kind="ai", payload_idx=payload_idx, stage_idx=stage)
+
+'------------------'
+with speed_profile(
+    ai={0: 0.85, 1: 0.85, 2: 0.85, 3: 0.85, 5: 0.85},          # speed other stages
+    ai_per_payload_stage={(abl_payload_index, 4): 1.9}          # slow ABL at Invocation
+):
+    # your ABL retry sequence...
+
